@@ -1,6 +1,5 @@
 using Dapper;
-using Microsoft.AspNetCore.Identity;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using Microsoft.Extensions.Configuration;
 using Microsoft.IdentityModel.Tokens;
 using MyApp.Application.DTOs;
@@ -17,13 +16,10 @@ namespace MyApp.Infrastructure.Repositories
     {
         private readonly IConfiguration _config;
 
-        public AuthRepository(IConfiguration config)
-        {
-            _config = config;
-        }
+        public AuthRepository(IConfiguration config) => _config = config;
 
         private IDbConnection CreateConnection()
-            => new SqlConnection(_config.GetConnectionString("DefaultConnection"));
+            => new NpgsqlConnection(_config.GetConnectionString("DefaultConnection"));
 
         private static string HashPassword(string password)
         {
@@ -54,28 +50,32 @@ namespace MyApp.Infrastructure.Repositories
 
         public async Task<int> RegisterAsync(RegisterDto dto)
         {
-            using var connection = CreateConnection();
-            return await connection.ExecuteAsync(
-                "sp_RegisterUser",
-                new { dto.Username, PasswordHash = HashPassword(dto.Password), dto.Role },
-                commandType: CommandType.StoredProcedure
-                );
+            using var conn = CreateConnection();
+            var exists = await conn.ExecuteScalarAsync<bool>(
+                "SELECT EXISTS(SELECT 1 FROM users WHERE username = @Username)",
+                new { dto.Username });
+
+            if (exists) throw new InvalidOperationException("Username already exists.");
+
+            return await conn.ExecuteAsync(
+                "INSERT INTO users (username, password_hash, role) VALUES (@Username, @PasswordHash, @Role)",
+                new { dto.Username, PasswordHash = HashPassword(dto.Password), dto.Role });
         }
+
         public async Task<LoginResponseDto?> LoginAsync(LoginDto dto)
         {
-            using var connection = CreateConnection();
-            var user = await connection.QueryFirstOrDefaultAsync(
-                "sp_LoginUser",
-                new { dto.Username, PasswordHash = HashPassword(dto.Password) },
-                commandType: CommandType.StoredProcedure);
+            using var conn = CreateConnection();
+            var user = await conn.QueryFirstOrDefaultAsync(
+                "SELECT id, username, role FROM users WHERE username = @Username AND password_hash = @PasswordHash",
+                new { dto.Username, PasswordHash = HashPassword(dto.Password) });
 
             if (user == null) return null;
 
             return new LoginResponseDto
             {
-                Token = GenerateToken((string)user.Username, (string)user.Role),
-                Username = (string)user.Username,
-                Role = (string)user.Role
+                Token = GenerateToken((string)user.username, (string)user.role),
+                Username = (string)user.username,
+                Role = (string)user.role
             };
         }
     }
